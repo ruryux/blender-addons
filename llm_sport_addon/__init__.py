@@ -2,7 +2,7 @@ bl_info = {
     "name": "LLM Sport Addon",
     "author": "Your Name",
     "version": (1, 1),
-    "blender": (4, 2, 0),  # お使いのバージョンに合わせてください
+    "blender": (5, 1, 2),  # お使いのバージョンに合わせてください
     "location": "View3D > Sidebar > LLM Sport Tab",
     "description": "NパネルからGemini Flash APIを呼び出し、簡潔な回答を中央ポップアップで表示するアドオン",
     "category": "Development",
