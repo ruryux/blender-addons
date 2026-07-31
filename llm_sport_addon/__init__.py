@@ -35,9 +35,32 @@ ensure_dependencies()
 import bpy
 import os
 import csv
+import re
 from datetime import datetime
 from google import genai
 from google.genai import types
+
+# ==========================================
+# マークダウン除去用ヘルパー関数
+# ==========================================
+def clean_markdown(text):
+    if not text:
+        return ""
+    # 太字 (**テキスト** や __テキスト__) の除去
+    text = re.sub(r'\*\*+(.*?)\*\*+', r'\1', text)
+    text = re.sub(r'__+(.*?)__+', r'\1', text)
+    # 斜体 (*テキスト* や _テキスト_) の除去
+    text = re.sub(r'\*+(.*?)\*+', r'\1', text)
+    text = re.sub(r'_+(.*?)_+', r'\1', text)
+    # インラインコード (`コード`) の除去
+    text = re.sub(r'`+(.*?)`+', r'\1', text)
+    # 行頭の見出し記号 (#) の除去
+    text = re.sub(r'^\s*#+\s*', '', text, flags=re.MULTILINE)
+    # 引用ブロック記号 (>) の除去
+    text = re.sub(r'^\s*>\s*', '', text, flags=re.MULTILINE)
+    # 行頭の箇条書き記号 (*, -, +) を「・」に統一
+    text = re.sub(r'^\s*[\-\*\+]\s+', '・ ', text, flags=re.MULTILINE)
+    return text
 
 # ==========================================
 # キャッシュ保存用ヘルパー関数
@@ -78,11 +101,15 @@ def call_gemini_api(api_key, question):
                     "ただし、ユーザーが設定値やパラメータについて尋ねてきた場合は、以下の3点を確実に含めて5行以内で簡潔に回答してください：\n"
                     "1. お勧めの設定値\n"
                     "2. 設定値が高い（大きい）場合の影響・挙動\n"
-                    "3. 設定値が低い（小さい）場合の影響・挙動"
+                    "3. 設定値が低い（小さい）場合の影響・挙動\n\n"
+                    "【重要】BlenderのUIはマークダウンをサポートしていません。そのため、回答は完全に「プレーンテキスト」で出力してください。\n"
+                    "- 太字（**）や斜体（*）、コードブロック（`）などのマークダウン記号は絶対に含めないでください（例：『**設定値**』ではなく『設定値』とする）。\n"
+                    "- プレーンテキストでも見やすくなるよう、改行を多めに入れ、箇条書き（・）や番号付きリスト（1. 2. 3.）、およびインデント（タブや半角/全角スペース）を積極的に使用して美しく読みやすいレイアウトに整えてください。"
                 )
             )
         )
-        answer = response.text
+        # マークダウン装飾を除去したプレーンテキストを生成
+        answer = clean_markdown(response.text)
         # キャッシュCSVへの書き出しを実行
         save_to_cache(question, answer)
         return answer
@@ -144,13 +171,43 @@ class LLMSPORT_OT_SpeedSearch(bpy.types.Operator):
         prop = getattr(context, "button_prop", None)
         pointer = getattr(context, "button_pointer", None)
         op = getattr(context, "button_operator", None)
+        active_socket = getattr(context, "active_socket", None) or getattr(context, "socket", None)
+        active_node = getattr(context, "active_node", None) or getattr(context, "node", None)
 
         # デバッグ用：取得されたオブジェクトの型をコンソールに表示
-        print(f"[LLM Sport Debug] prop: {prop}, pointer: {pointer}, op: {op}")
+        print(f"[LLM Sport Debug] prop: {prop}, pointer: {pointer}, op: {op}, socket: {active_socket}, node: {active_node}")
 
         question = ""
 
-        if prop:
+        if active_socket:
+            parent_node = getattr(active_socket, "node", None)
+            node_name = parent_node.name if parent_node else "不明"
+            node_id = parent_node.bl_idname if parent_node else "不明"
+            
+            socket_name = getattr(active_socket, "name", "不明") or "不明"
+            socket_id = getattr(active_socket, "identifier", "不明") or "不明"
+            socket_desc = getattr(active_socket, "description", "説明なし") or "説明なし"
+            socket_type = getattr(active_socket, "type", "不明") or "不明"
+            io_type = "出力" if active_socket.is_output else "入力"
+            
+            socket_value = ""
+            if not active_socket.is_output and hasattr(active_socket, "default_value"):
+                try:
+                    socket_value = f"\n・デフォルト値/現在の設定値: {active_socket.default_value}"
+                except Exception:
+                    pass
+
+            question = (
+                f"Blenderのノード「{node_name}」（識別名: {node_id}）に属する\n"
+                f"{io_type}ソケット「{socket_name}」について教えてください。\n"
+                f"・内部名 (identifier): {socket_id}\n"
+                f"・データタイプ (type): {socket_type}\n"
+                f"・説明 (description): {socket_desc}"
+                f"{socket_value}\n\n"
+                f"この「{node_name}」ノードの「{socket_name}」ソケットがどのような役割を持つか、接続すべきデータの種類、お勧めの設定値や使い方を分かりやすく日本語で解説してください。"
+            )
+
+        elif prop:
             prop_name = getattr(prop, "name", "不明") or "不明"
             prop_id = getattr(prop, "identifier", "不明") or "不明"
             prop_desc = getattr(prop, "description", "説明なし") or "説明なし"
@@ -192,16 +249,35 @@ class LLMSPORT_OT_SpeedSearch(bpy.types.Operator):
                 "この機能が何をするものか、どのような場面で使うか、および使い方のコツを分かりやすく日本語で解説してください。"
             )
 
+        elif active_node:
+            node_name = getattr(active_node, "name", "不明") or "不明"
+            node_id = getattr(active_node, "bl_idname", "不明") or "不明"
+            node_desc = getattr(active_node, "description", "説明なし") or "説明なし"
+            
+            inputs_str = ", ".join([s.name for s in active_node.inputs if s.name])
+            outputs_str = ", ".join([s.name for s in active_node.outputs if s.name])
+            
+            question = (
+                f"Blenderのノード「{node_name}」について教えてください。\n"
+                f"・識別名 (idname): {node_id}\n"
+                f"・説明 (description): {node_desc}\n"
+                f"・入力ソケット: {inputs_str}\n"
+                f"・出力ソケット: {outputs_str}\n\n"
+                f"この「{node_name}」ノードが何を行う機能か、どのような場面で使うか、主要なソケットの意味や使い方のコツ、設定のポイントを分かりやすく日本語で解説してください。"
+            )
+
         if not question:
             debug_msg = (
                 "ホバーしているプロパティ情報を取得できませんでした。\n\n"
                 "【確認・対策】\n"
-                "1. 対象のパラメータ（数値スライダー、カラー、チェックボックス等）またはボタンの上に「マウスカーソルが乗っている状態」でEキーを押してください。\n"
+                "1. 対象のパラメータ（数値スライダー、カラー、チェックボックス等）、ノード、またはソケットの上に「マウスカーソルが乗っている状態」で右クリックするか、Eキーを押してください。\n"
                 "2. 編集モード中の入力ボックス内（テキスト編集中）ではキーが文字入力として扱われるため、確定させてから（または編集中ではない状態で）ホバーしてEキーを押してください。\n\n"
                 f"【デバッグ情報】\n"
                 f"- button_prop: {prop}\n"
                 f"- button_operator: {op}\n"
-                f"- button_pointer: {pointer}"
+                f"- button_pointer: {pointer}\n"
+                f"- active_socket: {active_socket}\n"
+                f"- active_node: {active_node}"
             )
             self.report({'WARNING'}, "ホバー情報を取得できませんでした。")
             bpy.ops.wm.llm_sport_message_box('INVOKE_DEFAULT', message=debug_msg)
@@ -297,7 +373,7 @@ class VIEW3D_PT_llm_sport_panel(bpy.types.Panel):
 # 4. 登録と解除（__init__.pyに必要な修正）
 # ==========================================
 # 右クリックメニュー（コンテキストメニュー）に項目を追加する関数
-def draw_button_context_menu(self, context):
+def draw_speed_search_menu(self, context):
     # スピード検索がONのときのみ、メニューに表示する
     if getattr(context.scene, "llm_sport_speed_search_active", False):
         self.layout.separator()
@@ -305,7 +381,7 @@ def draw_button_context_menu(self, context):
         # このメニュー内で実行されることで context.button_prop 等が正しく引き継がれます
         self.layout.operator(
             LLMSPORT_OT_SpeedSearch.bl_idname, 
-            text="Geminiでスピード検索", 
+            text="AIでスピード検索", 
             icon='QUESTION'
         )
 
@@ -340,12 +416,33 @@ def register():
     )
 
     # 3. 右クリックメニューへの追加登録
-    bpy.types.UI_MT_button_context_menu.append(draw_button_context_menu)
+    bpy.types.UI_MT_button_context_menu.append(draw_speed_search_menu)
+    if hasattr(bpy.types, "NODE_MT_context_menu"):
+        bpy.types.NODE_MT_context_menu.append(draw_speed_search_menu)
+    if hasattr(bpy.types, "NODE_MT_socket_context_menu"):
+        bpy.types.NODE_MT_socket_context_menu.append(draw_speed_search_menu)
+    if hasattr(bpy.types, "NODE_MT_node_context_menu"):
+        bpy.types.NODE_MT_node_context_menu.append(draw_speed_search_menu)
 
 def unregister():
     # 1. 右クリックメニューの登録解除
     try:
-        bpy.types.UI_MT_button_context_menu.remove(draw_button_context_menu)
+        bpy.types.UI_MT_button_context_menu.remove(draw_speed_search_menu)
+    except Exception:
+        pass
+    try:
+        if hasattr(bpy.types, "NODE_MT_context_menu"):
+            bpy.types.NODE_MT_context_menu.remove(draw_speed_search_menu)
+    except Exception:
+        pass
+    try:
+        if hasattr(bpy.types, "NODE_MT_socket_context_menu"):
+            bpy.types.NODE_MT_socket_context_menu.remove(draw_speed_search_menu)
+    except Exception:
+        pass
+    try:
+        if hasattr(bpy.types, "NODE_MT_node_context_menu"):
+            bpy.types.NODE_MT_node_context_menu.remove(draw_speed_search_menu)
     except Exception:
         pass
 
